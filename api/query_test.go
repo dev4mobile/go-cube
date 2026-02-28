@@ -21,6 +21,10 @@ func testCube() *model.Cube {
 		Measures: map[string]model.Measure{
 			"count": {SQL: "count()", Type: "number"},
 		},
+		Segments: map[string]model.Segment{
+			"org":   {SQL: "org = '1'"},
+			"black": {SQL: "black = 1"},
+		},
 	}
 }
 
@@ -234,6 +238,110 @@ func TestBuildQuery_TimeDimensionLastMonth(t *testing.T) {
 	}
 }
 
+func TestBuildQuery_FilterTagSingleValue(t *testing.T) {
+	// equals 单值 -> has(arr, ?)
+	cube := testCube()
+	cube.Dimensions["riskFilterTag"] = model.Dimension{
+		SQL:  "arrayConcat(req_risk, res_risk)",
+		Type: "array",
+	}
+	req := &QueryRequest{
+		Dimensions: []string{"AccessView.id"},
+		Filters: []Filter{
+			{Member: "AccessView.riskFilterTag", Operator: "equals", Values: []interface{}{"SQL注入"}},
+		},
+	}
+
+	sql, params, err := BuildQuery(req, cube)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !contains(sql, "has(arrayConcat(req_risk, res_risk), ?)") {
+		t.Errorf("expected has() for array equals, got: %s", sql)
+	}
+	if len(params) != 1 || params[0] != "SQL注入" {
+		t.Errorf("unexpected params: %v", params)
+	}
+}
+
+func TestBuildQuery_FilterTagMultiValue(t *testing.T) {
+	// equals 多值 -> hasAll(arr, [?,?])
+	cube := testCube()
+	cube.Dimensions["riskFilterTag"] = model.Dimension{
+		SQL:  "arrayConcat(req_risk, res_risk)",
+		Type: "array",
+	}
+	req := &QueryRequest{
+		Dimensions: []string{"AccessView.id"},
+		Filters: []Filter{
+			{Member: "AccessView.riskFilterTag", Operator: "equals", Values: []interface{}{"SQL注入", "XSS"}},
+		},
+	}
+
+	sql, params, err := BuildQuery(req, cube)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !contains(sql, "hasAll(arrayConcat(req_risk, res_risk), [?,?])") {
+		t.Errorf("expected hasAll() for array equals multi-value, got: %s", sql)
+	}
+	if len(params) != 2 {
+		t.Errorf("expected 2 params, got: %v", params)
+	}
+}
+
+func TestBuildQuery_FilterTagContains(t *testing.T) {
+	// contains 多值 -> hasAny(arr, [?,?])
+	cube := testCube()
+	cube.Dimensions["riskFilterTag"] = model.Dimension{
+		SQL:  "arrayConcat(req_risk, res_risk)",
+		Type: "array",
+	}
+	req := &QueryRequest{
+		Dimensions: []string{"AccessView.id"},
+		Filters: []Filter{
+			{Member: "AccessView.riskFilterTag", Operator: "contains", Values: []interface{}{"SQL注入", "XSS"}},
+		},
+	}
+
+	sql, params, err := BuildQuery(req, cube)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !contains(sql, "hasAny(arrayConcat(req_risk, res_risk), [?,?])") {
+		t.Errorf("expected hasAny() for array contains, got: %s", sql)
+	}
+	if len(params) != 2 {
+		t.Errorf("expected 2 params, got: %v", params)
+	}
+}
+
+func TestBuildQuery_FilterTagNotEquals(t *testing.T) {
+	// notEquals 用 NOT has()
+	cube := testCube()
+	cube.Dimensions["riskFilterTag"] = model.Dimension{
+		SQL:  "arrayConcat(req_risk, res_risk)",
+		Type: "array",
+	}
+	req := &QueryRequest{
+		Dimensions: []string{"AccessView.id"},
+		Filters: []Filter{
+			{Member: "AccessView.riskFilterTag", Operator: "notEquals", Values: []interface{}{"SQL注入"}},
+		},
+	}
+
+	sql, params, err := BuildQuery(req, cube)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !contains(sql, "NOT has(arrayConcat(req_risk, res_risk), ?)") {
+		t.Errorf("expected NOT has() for array notEquals, got: %s", sql)
+	}
+	if len(params) != 1 {
+		t.Errorf("expected 1 param, got: %v", params)
+	}
+}
+
 func TestValidateQuery_Valid(t *testing.T) {
 	req := &QueryRequest{Dimensions: []string{"AccessView.id"}}
 	if err := validateQuery(req); err != nil {
@@ -255,15 +363,20 @@ func TestValidateQuery_NegativeLimit(t *testing.T) {
 	}
 }
 
-func TestExtractFieldName(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{"AccessView.id", "id"},
-		{"AccessView.ts", "ts"},
-		{"id", "id"},
+func TestSplitMemberName(t *testing.T) {
+	cases := []struct {
+		in        string
+		wantCube  string
+		wantField string
+	}{
+		{"AccessView.id", "AccessView", "id"},
+		{"AccessView.ts", "AccessView", "ts"},
+		{"id", "id", ""},
 	}
 	for _, c := range cases {
-		if got := extractFieldName(c.in); got != c.want {
-			t.Errorf("extractFieldName(%q) = %q, want %q", c.in, got, c.want)
+		cube, field := splitMemberName(c.in)
+		if cube != c.wantCube || field != c.wantField {
+			t.Errorf("splitMemberName(%q) = (%q, %q), want (%q, %q)", c.in, cube, field, c.wantCube, c.wantField)
 		}
 	}
 }
